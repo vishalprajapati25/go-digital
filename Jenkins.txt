@@ -1,0 +1,28 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git 'https://github.com/vishalprajapati25/go-digital.git'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh 'docker build -t my-lambda-image .'
+            }
+        }
+
+        stage('deploy to ECR') {
+            steps {
+                sh '''
+                aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin <your ecr repo>
+                docker tag my-lambda-image:latest <your ecr repo>
+                docker push <your ecr repo>
+                '''
+            }
+        }
+
+    }
+}
