@@ -1,72 +1,77 @@
 import boto3
 import os
-import sys
-import logging
-from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ParamValidationError
+import pymysql
+from uuid import uuid4
 
-logging.basicConfig(level=logging.INFO)
+def lambda_handler(event, context):
+    # Debugging: Print the incoming event
+    print(f"Received event: {event}")
 
-def read_data_from_s3(bucket_name, file_key):
-    s3 = boto3.client('s3')
+    # Validate 'Records' key in the event
+    if 'Records' not in event:
+        print("No 'Records' key found in the event")
+        return {
+            'statusCode': 400,
+            'body': "Invalid event format: 'Records' key missing."
+        }
+
+    # Get RDS connection details from environment variables
+    rds_host = os.environ.get('RDS_HOST')
+    rds_user = os.environ.get('RDS_USER')
+    rds_password = os.environ.get('RDS_PASSWORD')
+    rds_db_name = os.environ.get('RDS_DB_NAME')
+
+    # Establish connection to the RDS database
     try:
-        response = s3.get_object(Bucket=bucket_name, Key=file_key)
-        return response['Body'].read().decode('utf-8')
-    except ParamValidationError as e:
-        logging.error(f"Parameter validation error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        logging.error(f"Error reading data from S3: {e}")
-        sys.exit(1)
-
-def push_data_to_rds(data, rds_endpoint, db_name, user, password):
-    import psycopg2
-    try:
-        conn = psycopg2.connect(
-            host=rds_endpoint,
-            database=db_name,
-            user=user,
-            password=password
+        conn = pymysql.connect(
+            host=rds_host,
+            user=rds_user,
+            password=rds_password,
+            database=rds_db_name,
+            connect_timeout=10
         )
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO my_table (data) VALUES (%s)", (data,))
+        print("Successfully connected to RDS")
+    except pymysql.MySQLError as e:
+        print(f"Error connecting to RDS: {e}")
+        return {
+            'statusCode': 500,
+            'body': "Failed to connect to RDS."
+        }
+
+    # Process each record in the event
+    with conn.cursor() as cursor:
+        for record in event['Records']:
+            try:
+                # Extract required fields
+                bucket_name = record['s3']['bucket']['name']
+                object_key = record['s3']['object']['key']
+                size = record['s3']['object'].get('size', 0)
+                event_name = record['eventName']
+                event_time = record['eventTime']
+
+                # Prepare SQL query
+                insert_query = """
+                    INSERT INTO my_table (id, bucket_name, object_key, size, event_name, event_time)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                record_id = str(uuid4())
+                query_params = (record_id, bucket_name, object_key, size, event_name, event_time)
+
+                # Execute the query
+                cursor.execute(insert_query, query_params)
+                print(f"Successfully inserted: {object_key}")
+
+            except Exception as e:
+                print(f"Error processing record: {e}")
+                continue
+
+        # Commit the transaction
         conn.commit()
-        cursor.close()
-        conn.close()
-        logging.info("Data pushed to RDS successfully.")
-    except Exception as e:
-        logging.error(f"Error pushing data to RDS: {e}")
-        return False
-    return True
 
-def push_data_to_glue(data, glue_database, glue_table):
-    glue_client = boto3.client('glue')
-    try:
-        glue_client.put_record(
-            DatabaseName=glue_database,
-            TableName=glue_table,
-            Record={"data": data}
-        )
-        logging.info("Data pushed to Glue successfully.")
-    except Exception as e:
-        logging.error(f"Error pushing data to Glue: {e}")
-        sys.exit(1)
+    # Close the connection
+    conn.close()
 
-if __name__ == "__main__":
-    BUCKET_NAME = os.getenv("S3_BUCKET")
-    FILE_KEY = os.getenv("S3_KEY")
-    RDS_ENDPOINT = os.getenv("RDS_ENDPOINT")
-    DB_NAME = os.getenv("DB_NAME")
-    USER = os.getenv("DB_USER")
-    PASSWORD = os.getenv("DB_PASSWORD")
-    GLUE_DATABASE = os.getenv("GLUE_DATABASE")
-    GLUE_TABLE = os.getenv("GLUE_TABLE")
-
-    if not FILE_KEY:
-        logging.error("S3_KEY environment variable is not set or is empty")
-        sys.exit(1)
-
-    logging.info(f"Reading data from S3 bucket: {BUCKET_NAME}, key: {FILE_KEY}")
-    data = read_data_from_s3(BUCKET_NAME, FILE_KEY)
-
-    if not push_data_to_rds(data, RDS_ENDPOINT, DB_NAME, USER, PASSWORD):
-        push_data_to_glue(data, GLUE_DATABASE, GLUE_TABLE)
+    return {
+        'statusCode': 200,
+        'body': "Processing complete."
+    }
